@@ -102,14 +102,11 @@ sub parse {
         return @events;
     }
     else {
-        return sub {
-            return $self->check_event() ? $self->get_event() : undef;
-        };
+        return $self->check_event() ? $self->get_event() : ();
     }
 }
 
 sub check_event {
-    # print "+check_event\n";
     my $self = shift;
     my @choices = @_;
     if (not defined $self->current_event) {
@@ -132,7 +129,6 @@ sub check_event {
 }
 
 sub peek_event {
-    # print "+peek_event\n";
     my $self = shift;
     if (not defined $self->current_event) {
         if (my $state = $self->state) {
@@ -143,11 +139,7 @@ sub peek_event {
 }
 
 sub get_event {
-    # print "+get_event\n";
     my $self = shift;
-    # print $self->state . "\n";
-    # print "  " . $self->scanner->peek_token() . "\n";
-    # print "  [@{$self->scanner->tokens}]\n";
     if (not defined $self->current_event) {
         if (my $state = $self->state) {
             $self->current_event($self->$state());
@@ -155,7 +147,6 @@ sub get_event {
     }
     my $value = $self->current_event;
     $self->current_event(undef);
-    # print "    $value\n";
     return $value;
 }
 
@@ -280,7 +271,7 @@ sub process_directives {
     $self->{yaml_version} = undef;
     $self->{tag_handles} = {};
     while ($self->scanner->check_token('YAML::Perl::Token::Directive')) {
-        XXX my $token = $self->get_token();
+        XXX my $token = $self->scanner->get_token();
     }
 }
 
@@ -305,7 +296,7 @@ sub parse_node {
     
     my $event;
     if ($self->scanner->check_token('YAML::Perl::Token::Alias')) {
-        my $token = $self->get_token();
+        my $token = $self->scanner->get_token();
         $event = YAML::Perl::Event::Alias->new(
             anchor     => $token->value,
             start_mark => $token->start_mark,
@@ -478,7 +469,36 @@ sub parse_block_sequence_first_entry {
 
 sub parse_block_sequence_entry {
     my $self = shift;
-    die "parse_block_sequence_entry";
+    if ($self->scanner->check_token('YAML::Perl::Token::BlockEntry')) {
+        my $token = $self->scanner->get_token();
+        if (not $self->scanner->check_token(qw(
+            YAML::Perl::Token::BlockEntry
+            YAML::Perl::Token::BlockEnd
+        ))) {
+            push @{$self->states}, 'parse_block_sequence_entry';
+            return $self->parse_block_node();
+        }
+        else {
+            $self->state('parse_block_sequence_entry');
+            return $self->process_empty_scalar($token->end_mark);
+        }
+    }
+    if (not $self->scanner->check_token('YAML::Perl::Token::BlockEnd')) {
+        my $token = $self->scanner->peek_token();
+        warn $token->value;
+        throw YAML::Perl::Error::Parser(
+            "while parsing a block collection", $self->marks->[-1],
+            "expected <block end>, but found ", $token->id, $token->start_mark
+        );
+    }
+    my $token = $self->scanner->get_token();
+    my $event = YAML::Perl::Event::SequenceEnd->new(
+        start_mark => $token->start_mark,
+        end_mark => $token->end_mark,
+    );
+    $self->state(pop @{$self->states});
+    pop @{$self->marks};
+    return $event;
 }
 
 sub parse_indentless_sequence_entry {
@@ -512,9 +532,10 @@ sub parse_block_mapping_key {
     }
     if (not $self->scanner->check_token('YAML::Perl::Token::BlockEnd')) {
         my $token = $self->scanner->peek_token();
+        warn $token->value;
         throw YAML::Perl::Error::Parser(
             "while parsing a block mapping", $self->marks->[-1],
-            "expected <block end>, but found %r", $token->id, $token->start_mark
+            "expected <block end>, but found ", $token->id, $token->start_mark
         );
     }
     my $token = $self->scanner->get_token();

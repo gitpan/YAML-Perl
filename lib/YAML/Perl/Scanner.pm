@@ -75,20 +75,23 @@ field allow_simple_key => True;
 
 field possible_simple_keys => {};
 
-# sub scan {
-#     my $self = shift;
-#     my @events = ();
-#     while ($self->check_token()) {
-#         push @events, $self->get_token();
-#         print "$events[-1]\n";
-#     }
-#     @events;
-# }
+sub scan {
+    my $self = shift;
+    if (wantarray) {
+        my @tokens = ();
+        while ($self->check_token()) {
+            push @tokens, $self->get_token();
+        }
+        return @tokens;
+    }
+    else {
+        return $self->check_token() ? $self->get_token() : ();
+    }
+}
 
 # Public methods.
 
 sub check_token {
-    # print "+check_token\n";
     my $self = shift;
     my @choices = @_;
     while ($self->need_more_tokens()) {
@@ -108,7 +111,6 @@ sub check_token {
 }
 
 sub peek_token {
-    # print "+peek_token\n";
     my $self = shift;
     while ($self->need_more_tokens()) {
         $self->fetch_more_tokens();
@@ -120,7 +122,6 @@ sub peek_token {
 }
 
 sub get_token {
-    # print "+get_token\n";
     my $self = shift;
     while ($self->need_more_tokens()) {
         $self->fetch_more_tokens();
@@ -553,12 +554,16 @@ sub fetch_value {
 
 sub fetch_alias {
     my $self = shift;
-    die "fetch_alias";
+    $self->save_possible_simple_key();
+    $self->allow_simple_key(False);
+    push @{$self->tokens}, $self->scan_anchor('YAML::Perl::Token::Alias');
 }
 
 sub fetch_anchor {
     my $self = shift;
-    die "fetch_anchor";
+    $self->save_possible_simple_key();
+    $self->allow_simple_key(False);
+    push @{$self->tokens}, $self->scan_anchor('YAML::Perl::Token::Anchor');
 }
 
 sub fetch_tag {
@@ -662,7 +667,6 @@ sub scan_to_next_token {
     }
     my $found = False;
     while (not $found) {
-        # print ">>>> " . $self->reader->peek() . "\n";
         $self->reader->forward()
             while $self->reader->peek() eq ' ';
         if ($self->reader->peek() eq '#') {
@@ -679,7 +683,6 @@ sub scan_to_next_token {
             $found = True;
         }
     }
-    # print "<<<<\n" ;
 }
 
 sub scan_plain {
@@ -746,6 +749,41 @@ sub scan_plain {
         end_mark => $end_mark,
     );
 }
+
+sub scan_anchor {
+    my $self = shift;
+    my $token_class = shift;
+    my $start_mark = $self->reader->get_mark();
+    my $indicator = $self->reader->peek();
+    my $name;
+    if ($indicator eq '*') {
+        $name = 'alias';
+    } else {
+        $name = 'anchor';
+    }
+    $self->reader->forward();
+    my $length = 0;
+    my $ch = $self->reader->peek($length);
+    while ($ch =~ /^[0-9A-Za-z-_]$/) {
+        $length += 1;
+        $ch = $self->reader->peek($length);
+    }
+    if (not $length) {
+        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
+            . "alphabetic or numeric character, but found " . $self->get_mark());
+    }
+    my $value = $self->reader->prefix($length);
+    $self->reader->forward($length);
+    $ch = $self->reader->peek();
+    if ($ch !~ /^[\0 \t\r\n\x85\u2028\u2029?:,\]}%@]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
+            . "alphabetic or numeric character, but found " . $self->get_mark());
+    }
+    my $end_mark = $self->reader->get_mark();
+    return $token_class->new(value => $value, start_mark => $start_mark, end_mark => $end_mark);
+}
+
+
 
 #   ... ch in u'\r\n\x85\u2028\u2029':
 # XXX needs unicode linefeeds 

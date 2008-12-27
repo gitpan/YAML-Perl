@@ -1,7 +1,3 @@
-# pyyaml/lib/yaml/__init__.py
-# pyyaml/lib/yaml/loader.py
-# pyyaml/lib/yaml/dumper.py
-
 package YAML::Perl;
 use 5.005003;
 use strict;
@@ -9,7 +5,7 @@ use warnings; # XXX requires 5.6+
 use Carp;
 use YAML::Perl::Base -base;
 
-$YAML::Perl::VERSION = '0.01';
+$YAML::Perl::VERSION = '0.01_01';
 
 @YAML::Perl::EXPORT = qw'Dump Load';
 @YAML::Perl::EXPORT_OK = qw'DumpFile LoadFile freeze thaw';
@@ -40,7 +36,9 @@ sub Dump {
 }
 
 sub Load {
-    return YAML::Perl->new->loader->load(@_);
+    my $loader = YAML::Perl->new->loader;
+    $loader->open(@_);
+    return ($loader->load());
 }
 
 {
