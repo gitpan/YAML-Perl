@@ -6,7 +6,6 @@
 # node ::= SCALAR | sequence | mapping
 # sequence ::= SEQUENCE-START node* SEQUENCE-END
 # mapping ::= MAPPING-START (node node)* MAPPING-END
-
 # To Do:
 # - Make encode stuff work
 
@@ -16,7 +15,7 @@ use warnings;
 
 use YAML::Perl::Error;
 use YAML::Perl::Events;
-use YAML::Perl::Stream;
+use YAML::Perl::Writer;
 
 package YAML::Perl::Error::Emitter;
 use YAML::Perl::Error -base;
@@ -36,14 +35,15 @@ field 'allow_block';
 package YAML::Perl::Emitter;
 use YAML::Perl::Processor -base;
 
-field next_layer => '';
+field next_layer => 'writer';
+field 'writer_class', -init => '"YAML::Perl::Writer"';
+field 'writer', -init => '$self->create("writer")';
 
 use constant DEFAULT_TAG_PREFIXES => {
     '!' => '!',
     'tag:yaml.org,2002:' => '!!',
 };
 
-field 'stream';
 field 'encoding';
 field 'states' => [];
 field 'state' => 'expect_stream_start'; # Made this a function name instead of pointer
@@ -84,24 +84,12 @@ sub init {
         $p{best_line_break} = delete $p{line_break};
     }
     $self->SUPER::init(%p);
-    if (not $self->stream) {
-        my $output = '';
-        $self->stream(YAML::Perl::Stream->open(\ $output)); 
-    }
 }
 
 sub emit {
     my $self = shift;
     my $events = $self->events;
-    if (ref($_[0]) eq 'CODE') {
-        my $iterator = shift;
-        while (my $event = $iterator->()) {
-            push @$events, $event; 
-        }
-    }
-    else {
-        push @$events, @_;
-    }
+    push @$events, @_;
 
     while (not $self->need_more_events()) {
         $self->event(shift @$events);
@@ -109,7 +97,7 @@ sub emit {
         $self->$state();
         $self->event(undef);
     }
-    return ${$self->stream->buffer};
+    return ${$self->writer->stream->buffer};
 }
 
 sub need_more_events {
@@ -159,8 +147,8 @@ sub need_events {
 
 sub increase_indent {
     my $self = shift;
-    my $flow = shift || False;
-    my $indentless = shift || False;
+    my $flow = @_ ? shift : False;
+    my $indentless = @_ ? shift : False;
     push @{$self->indents}, $self->indent;
     if (not defined $self->indent) {
         if ($flow) {
@@ -206,7 +194,7 @@ sub expect_first_document_start {
 
 sub expect_document_start {
     my $self = shift;
-    my $first = shift || False;
+    my $first = @_ ? shift : False;
     if ($self->event->isa('YAML::Perl::Event::DocumentStart')) {
         if ($self->event->version) {
             my $version_text = $self->prepare_version($self->event->version);
@@ -230,6 +218,7 @@ sub expect_document_start {
             not $self->event->tags and
             not $self->check_empty_document()
         );
+        $implicit = False; # XXX Different than PyYaml
         if (not $implicit) {
             $self->write_indent();
             $self->write_indicator('---', True);
@@ -343,35 +332,130 @@ sub expect_scalar {
 
 sub expect_flow_sequence {
     my $self = shift;
-    die 'expect_flow_sequence';
+
+    $self->write_indicator('[', True, whitespace => True);
+    $self->flow_level($self->flow_level + 1);
+    $self->increase_indent(True);
+    $self->state('expect_first_flow_sequence_item');
 }
 
 sub expect_first_flow_sequence_item {
-    die 'expect_first_flow_sequence_item';
+    my $self = shift;
+
+    if ($self->event->isa('YAML::Perl::Event::SequenceEnd')) {
+        $self->indent(pop @{$self->indents});
+        $self->flow_level -= 1;
+        $self->write_indicator(']', False);
+        $self->state(pop @{$self->states});
+    }
+    else {
+        if ($self->canonical or $self->column > $self->best_width) {
+            $self->write_indent();
+        }
+        push @{$self->states}, 'expect_flow_sequence_item';
+        $self->expect_node(sequence => True);
+    }
 }
 
 sub expect_flow_sequence_item {
-    die 'expect_flow_sequence_item';
+    my $self = shift;
+
+    if ($self->event->isa('YAML::Perl::Event::SequenceEnd')) {
+        $self->indent(pop @{$self->indents});
+        $self->flow_level($self->flow_level - 1);
+        if ($self->canonical) {
+            $self->write_indicator(',', False);
+            $self->write_indent();
+        }
+        $self->write_indicator(']', False);
+        $self->state(pop @{$self->states});
+    }
+    else {
+        $self->write_indicator(',', False);
+        if ($self->canonical or $self->column > $self->best_width) {
+            $self->write_indent();
+        }
+        push @{$self->states}, 'expect_flow_sequence_item';
+        $self->expect_node(sequence => True);
+    }
 }
 
 sub expect_flow_mapping {
-    die 'expect_flow_mapping';
+    my $self = shift;
+    $self->write_indicator('{', True, whitespace => True);
+    $self->flow_level($self->flow_level + 1);
+    $self->increase_indent(True);
+    $self->state('expect_first_flow_mapping_key');
 }
 
 sub expect_first_flow_mapping_key {
-    die 'expect_first_flow_mapping_key';
+    my $self = shift;
+    if ($self->event->isa('YAML::Perl::Event::MappingEnd')) {
+        $self->indent(pop @{$self->indents});
+        $self->flow_level($self->flow_level - 1);
+        $self->write_indicator('}', False);
+        self->state(pop @{$self->states});
+    }
+    else {
+        if ($self->canonical or $self->column > $self->best_width) {
+            $self->write_indent();
+        }
+        if (not $self->canonical and $self->check_simple_key()) {
+            push @{$self->states}, 'expect_flow_mapping_simple_value';
+            $self->expect_node(mapping => True, simple_key => True);
+        }
+        else {
+            $self->write_indicator('?', True);
+            push @{$self->states}, 'expect_flow_mapping_value';
+            $self->expect_node(mapping => True);
+        }
+    }
 }
 
 sub expect_flow_mapping_key {
-    die 'expect_flow_mapping_key';
+    my $self = shift;
+    if ($self->event->isa('YAML::Perl::Event::MappingEnd')) {
+        $self->indent(pop, @{$self->indents});
+        $self->flow_level($self->flow_level - 1);
+        if ($self->canonical) {
+            $self->write_indicator(',', False);
+            $self->write_indent();
+        }
+        $self->write_indicator('}', False);
+        $self->state(pop @{$self->states});
+    }
+    else {
+        $self->write_indicator(',', False);
+        if ($self->canonical or $self->column > $self->best_width) {
+            $self->write_indent();
+        }
+        if (not $self->canonical and $self->check_simple_key()) {
+            push @{$self->states}, 'expect_flow_mapping_simple_value';
+            $self->expect_node(mapping => True, simple_key => True);
+        }
+        else {
+            $self->write_indicator('?', True);
+            push @{$self->states}, 'expect_flow_mapping_value';
+            $self->expect_node(mapping => True);
+        }
+    }
 }
 
 sub expect_flow_mapping_simple_value {
-    die 'expect_flow_mapping_simple_value';
+    my $self = shift;
+    $self->write_indicator(':', False);
+    push @{$self->states}, 'expect_flow_mapping_key';
+    $self->expect_node(mapping => True);
 }
 
 sub expect_flow_mapping_value {
-    die 'expect_flow_mapping_value';
+    my $self = shift;
+    if ($self->canonical or $self->column > $self->best_width) {
+        $self->write_indent();
+    }
+    $self->write_indicator(':', True);
+    push @{$self->states}, 'expect_flow_mapping_key';
+    $self->expect_node(mapping => True);
 }
 
 sub expect_block_sequence {
@@ -388,7 +472,7 @@ sub expect_first_block_sequence_item {
 
 sub expect_block_sequence_item {
     my $self = shift;
-    my $first = shift || False;
+    my $first = @_ ? shift : False;
     if (not $first and $self->event->isa('YAML::Perl::Event::SequenceEnd')) {
         $self->indent(pop @{$self->indents});
         $self->state(pop @{$self->states});
@@ -414,7 +498,7 @@ sub expect_first_block_mapping_key {
 
 sub expect_block_mapping_key {
     my $self = shift;
-    my $first = shift || False;
+    my $first = @_ ? shift : False;
     if (not $first and $self->event->isa('YAML::Perl::Event::MappingEnd')) {
         $self->indent(pop @{$self->indents});
         $self->state(pop @{$self->states});
@@ -606,7 +690,7 @@ sub choose_scalar_style {
             return $self->event->style
         }
     }
-    if (not $self->event->style or $self->event->style == '\'') {
+    if (not $self->event->style or $self->event->style eq '\'') {
         if (
             $self->analysis->allow_single_quoted and
             not ($self->simple_key_context and $self->analysis->multiline)
@@ -649,7 +733,13 @@ sub process_scalar {
 }
 
 sub prepare_version {
-    die 'prepare_version';
+    my $self = shift;
+    my $version = shift;
+    my ($major, $minor) = split('\.', $version);
+    if ($major != 1) {
+        throw YAML::Perl::Error::Emitter->("unsupported YAML version: $major.$minor");
+    }
+    return "$major.$minor";
 }
 
 sub prepare_tag_handle {
@@ -835,7 +925,7 @@ sub analyze_scalar {
 
     # Last character or followed by a whitespace.
     my $followed_by_space =
-        (length($scalar) == 1 or $scalar =~ /.[\0 \t\r\n\x85\x{2028}\x{2029}]/);
+        (length($scalar) == 1 or $scalar =~ /^.[\0 \t\r\n\x85\x{2028}\x{2029}]/s);
 
     # The current series of whitespaces contain plain spaces.
     my $spaces = False;
@@ -930,13 +1020,13 @@ sub analyze_scalar {
                 }
             }
             elsif ($breaks) {
-                if ($ch == ' ') {      # break+ space+
+                if ($ch eq ' ') {      # break+ space+
                     $spaces = True;
                 }
             }
             else {
                 $leading = ($index == 0);
-                if ($ch == ' ') {      # space+
+                if ($ch eq ' ') {      # space+
                     $spaces = True;
                 }
                 else {                 # break+
@@ -976,7 +1066,7 @@ sub analyze_scalar {
         }
 
         # Series of whitespaces reach the end.
-        if (($spaces or $breaks) and ($index == length($scalar)-1)) {
+        if (($spaces or $breaks) and ($index == (length($scalar) - 1))) {
             if ($spaces and $breaks) {
                 $mixed_breaks_spaces = True;
             }
@@ -1000,7 +1090,7 @@ sub analyze_scalar {
         $preceeded_by_space = ($ch =~ /^[\0 \t\r\n\x85\x{2028}\x{2029}]$/);
         $followed_by_space = (
             $index + 1 >= length($scalar) or
-            substr($scalar, index+1, 1) =~ /^[\0\ \t\r\n\x85\x{2028}\x{2029}]$/
+            substr($scalar, index + 1, 1) =~ /^[\0\ \t\r\n\x85\x{2028}\x{2029}]$/
         );
     }
 
@@ -1065,15 +1155,15 @@ sub analyze_scalar {
 
 sub flush_stream {
     my $self = shift;
-    if ($self->stream->can('flush')) {
-        $self->stream->flush();
+    if ($self->writer->stream->can('flush')) {
+        $self->writer->stream->flush();
     }
 }
 
 sub write_stream_start {
     my $self = shift;
     if ($self->encoding and $self->encoding =~ /^utf-16/) {
-        $self->stream->write("\xff\xfe");
+        $self->writer->write("\xff\xfe");
     }
 }
 
@@ -1103,7 +1193,7 @@ sub write_indicator {
     if ($self->encoding) {
 #         my $data = $data->encode($self->encoding);
     }
-    $self->stream->write($data);
+    $self->writer->write($data);
 }
 
 sub write_indent {
@@ -1122,7 +1212,7 @@ sub write_indent {
         if ($self->encoding) {
             # $data = $data->encode($self->encoding); #XXX
         }
-        $self->stream->write($data);
+        $self->writer->write($data);
     }
 }
 
@@ -1139,11 +1229,18 @@ sub write_line_break {
     if ($self->encoding) {
 #         $data = $data->encode($self->encoding);
     }
-    $self->stream->write($data);
+    $self->writer->write($data);
 }
 
 sub write_version_directive {
-    die 'write_version_directive';
+    my $self = shift;
+    my $version_text = shift;
+    my $data = "%YAML $version_text";
+    if ($self->encoding) {
+#         $data = $data->encode($self->encoding);
+    }
+    $self->writer->write($data);
+    $self->write_line_break();
 }
 
 sub write_tag_directive {
@@ -1181,7 +1278,7 @@ sub write_single_quoted {
                     if ($self->encoding) {
                         # my $data = $data->encode($self->encoding);
                     }
-                    $self->stream->write($data);
+                    $self->writer->write($data);
                 }
                 $start = $end;
             }
@@ -1214,18 +1311,18 @@ sub write_single_quoted {
                     if ($self->encoding) {
                         # $data = $data->encode($self->encoding);
                     }
-                    $self->stream->write($data);
+                    $self->writer->write($data);
                     $start = $end;
                 }
             }
         }
-        if ($ch eq '\'') {
+        if ($ch and $ch eq '\'') {
             my $data = '\'\'';
             $self->column($self->column + 2);
             if ($self->encoding) {
                 # $data = $data->encode($self->encoding);
             }
-            $self->stream->write($data);
+            $self->writer->write($data);
             $start = $end + 1;
         }
         if (defined $ch) {
@@ -1237,8 +1334,108 @@ sub write_single_quoted {
     $self->write_indicator('\'', False);
 }
 
+use constant ESCAPE_REPLACEMENTS => {
+    "\0" => '0',
+    "\x07" => 'a',
+    "\x08" => 'b',
+    "\x09" => 't',
+    "\x0A" => 'n',
+    "\x0B" => 'v',
+    "\x0C" => 'f',
+    "\x0D" => 'r',
+    "\x1B" => 'e',
+    "\"" => '"',
+    "\\" => '\\',
+    "\x85" => 'N',
+    "\xA0" => '_',
+    "\x{2028}" => 'L',
+    "\x{2029}" => 'P',
+};
+
 sub write_double_quoted {
-    die 'write_double_quoted';
+    my $self = shift;
+    my $text = shift;
+    my $split = @_ ? shift : True;
+
+    $self->write_indicator('"', True);
+    my $start = 0;
+    my $end = 0;
+    while ($end <= length($text)) {
+        my $ch = undef;
+        if ($end < length($text)) {
+            $ch = substr($text, $end, 1);
+        }
+        if (not defined $ch or
+            $ch =~ /^[\"\\\x85\x{2028}\x{2029}\x{FEFF}]$/ or
+            not (
+                $ch ge "\x20" and $ch le "\x7E" or
+                ($self->allow_unicode and
+                    (
+                        $ch ge "\xA0" and $ch le "\x{D7FF}" or
+                        $ch ge "\x{E000}" and $ch le "\x{FFFD}"
+                    )
+                )
+            )) {
+            if ($start < $end) {
+                my $data = substr($text, $start, $end - $start);
+                $self->column($self->column + length($data));
+                if ($self->encoding) {
+                    # $data = $data; # .encode(self.encoding)
+                }
+                $self->writer->write($data);
+                $start = $end;
+            }
+            if (defined $ch) {
+                my $data;
+                if (defined ESCAPE_REPLACEMENTS->{$ch}) {
+                    $data = '\\' . ESCAPE_REPLACEMENTS->{$ch};
+                }
+                elsif ($ch le "\xFF") {
+                    $data = sprintf "\\x%02X", ord($ch);
+                }
+#                 elsif ($ch le "\x{ffff}") {
+#                     $data = sprintf "\\u%04X", ord($ch);
+#                 }
+                else {
+                    $data = printf "\\U%08X", ord($ch);
+                }
+                $self->column($self->column + length($data));
+                if ($self->encoding) {
+                    # $data = $data; # .encode(self.encoding)
+                }
+                $self->writer->write($data);
+                $start = $end + 1;
+            }
+        }
+        if ($end > 0 and $end < (length($text) - 1) and
+            ($ch eq ' ' or $start >= $end) and
+            ($self->column + ($end - $start)) > $self->best_width and
+            $split
+        ) {
+            my $data = substr($text, $start, $end - $start) . '\\';
+            if ($start < $end) {
+                $start = $end;
+            }
+            $self->column($self->column + length($data));
+            if ($self->encoding) {
+                # $data = $data; # .encode(self.encoding)
+            }
+            $self->writer->write($data);
+            $self->write_indent();
+            $self->whitespace(False);
+            $self->indention(False);
+            if (substr($text, $start, 1) eq ' ') {
+                $data = '\\';
+                $self->column($self->column + length($data));
+                if ($self->encoding) {
+                    # $data = $data; # .encode(self.encoding)
+                }
+                $self->writer->write($data);
+            }
+        }
+        $end += 1;
+    }
+    $self->write_indicator('"', False);
 }
 
 sub determine_chomp {
@@ -1266,7 +1463,7 @@ sub write_plain {
         if ($self->encoding) {
 #             $data = $data->encode($self->encoding);
         }
-        $self->stream->write($data);
+        $self->writer->write($data);
     }
     $self->whitespace(False);
     $self->indention(False);
@@ -1294,7 +1491,7 @@ sub write_plain {
                     if ($self->encoding) {
 #                         $data = $data->encode($self->encoding)
                     }
-                    $self->stream->write($data);
+                    $self->writer->write($data);
                 }
                 $start = $end;
             }
@@ -1325,7 +1522,7 @@ sub write_plain {
                 if ($self->encoding) {
 #                     $data = $data->encode($self->encoding);
                 }
-                $self->stream->write($data);
+                $self->writer->write($data);
                 $start = $end;
             }
         }

@@ -5,7 +5,7 @@ use warnings; # XXX requires 5.6+
 use Carp;
 use YAML::Perl::Base -base;
 
-$YAML::Perl::VERSION = '0.01_01';
+$YAML::Perl::VERSION = '0.01_02';
 
 @YAML::Perl::EXPORT = qw'Dump Load';
 @YAML::Perl::EXPORT_OK = qw'DumpFile LoadFile freeze thaw';
@@ -32,7 +32,11 @@ field resolver =>
     -init => '$self->create("resolver")';
 
 sub Dump {
-    return YAML::Perl->new->dumper->dump(@_);
+    my $dumper = YAML::Perl->new()->dumper;
+    $dumper->open();
+    $dumper->dump(@_);
+    $dumper->close;
+    return $dumper->stream;
 }
 
 sub Load {

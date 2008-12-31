@@ -4,12 +4,12 @@ use YAML::Perl;
 
 spec_file('t/data/parser_emitter');
 filters {
-    yaml => 'load_yaml',
-    perl => 'eval',
+    perl => ['eval', 'dump_yaml'],
 };
 
-run_is_deeply yaml => 'perl';
+run_is perl => 'dump';
 
-sub load_yaml {
-    Load($_);
+sub dump_yaml {
+    Dump(@_);
 }
+

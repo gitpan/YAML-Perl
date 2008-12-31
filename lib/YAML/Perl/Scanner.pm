@@ -496,7 +496,7 @@ sub fetch_key {
                 "mapping keys are not allowed here", $self->get_mark()
             );
         }
-        if ($self->add_indent($self->column)) {
+        if ($self->add_indent($self->reader->column)) {
             my $mark = $self->reader->get_mark();
             push @{$self->tokens}, YAML::Perl::Token::BlockMappingStart->new(
                 start_mark=> $mark,
@@ -540,7 +540,42 @@ sub fetch_value {
         $self->allow_simple_key(False);
     }
     else {
-        die;
+        # Block context needs additional checks.
+        # (Do we really need them? They will be catched by the parser
+        # anyway.)
+        if (not $self->flow_level) {
+
+            # We are allowed to start a complex value if and only if
+            # we can start a simple key.
+            if (not $self->allow_simple_key) {
+                throw YAML::Perl::Error::Scanner(
+                    undef,
+                    undef,
+                    "mapping values are not allowed here",
+                    $self->reader->get_mark(),
+                );
+            }
+        }
+
+        # If this value starts a new block mapping, we need to add
+        # BLOCK-MAPPING-START.  It will be detected as an error later by
+        # the parser.
+        if (not $self->flow_level) {
+            if ($self->add_indent($self->reader->column)) {
+                my $mark = $self->reader->get_mark();
+                push @{$self->tokens}, 
+                    YAML::Perl::Token::BlockMappingStart(
+                        start_mark => $mark,
+                        end_mark => $mark,
+                    );
+            }
+        }
+
+        # Simple keys are allowed after ':' in the block context.
+        $self->allow_simple_key(not $self->flow_level);
+
+        # Reset possible simple key on the current level.
+        $self->remove_possible_simple_key();
     }
     my $start_mark = $self->reader->get_mark();
     $self->reader->forward();
@@ -573,7 +608,7 @@ sub fetch_tag {
 
 sub fetch_literal {
     my $self = shift;
-    die "fetch_literal";
+    $self->fetch_block_scalar('|');
 }
 
 sub fetch_folded {
@@ -583,22 +618,40 @@ sub fetch_folded {
 
 sub fetch_block_scalar {
     my $self = shift;
-    die "fetch_block_scalar";
+    my $style = shift;
+
+    # A simple key may follow a block scalar.
+    $self->allow_simple_key(True);
+
+    # Reset possible simple key on the current level.
+    $self->remove_possible_simple_key();
+
+    # Scan and add SCALAR.
+    push @{$self->tokens}, $self->scan_block_scalar($style);
 }
 
 sub fetch_single {
     my $self = shift;
-    die "fetch_single";
+    $self->fetch_flow_scalar('\'');
 }
 
 sub fetch_double {
     my $self = shift;
-    die "fetch_double";
+    $self->fetch_flow_scalar('"');
 }
 
 sub fetch_flow_scalar {
     my $self = shift;
-    die "fetch_flow_scalar";
+    my $style = shift;
+
+    # A flow scalar could be a simple key.
+    $self->save_possible_simple_key();
+
+    # No simple keys after flow scalars.
+    $self->allow_simple_key(False);
+
+    # Scan and add SCALAR.
+    push @{$self->tokens}, $self->scan_flow_scalar($style);
 }
 
 sub fetch_plain {
@@ -610,7 +663,10 @@ sub fetch_plain {
 
 sub check_directive {
     my $self = shift;
-    die "check_directive";
+    if ($self->reader->column == 0) {
+        return True;
+    }
+    return;
 }
 
 sub check_document_start {
@@ -685,6 +741,597 @@ sub scan_to_next_token {
     }
 }
 
+sub scan_directive {
+    my $self = shift;
+    my $start_mark = $self->reader->get_mark();
+    $self->reader->forward();
+    my $name = $self->scan_directive_name($start_mark);
+    my $value = undef;
+    my $end_mark;
+    if ($name eq 'YAML') {
+        $value = $self->scan_yaml_directive_value($start_mark);
+        $end_mark = $self->reader->get_mark();
+    }
+    elsif ($name eq 'TAG') {
+        $value = $self->scan_tag_directive_value($start_mark);
+        $end_mark = $self->reader->get_mark();
+    }
+    else {
+        $end_mark = $self->reader->get_mark();
+        while ($self->reader->peek() !~ /^[\0\r\n\x85\u2028\u2029]$/) {
+            $self->reader->forward();
+        }
+    }
+    $self->scan_directive_ignored_line($start_mark);
+    return YAML::Perl::Token::Directive->new(
+        name       => $name,
+        value      => $value,
+        start_mark => $start_mark,
+        end_mark   => $end_mark
+    );
+}
+
+sub scan_directive_name {
+    my $self = shift;
+    my $start_mark = shift;
+    my $length = 0;
+    my $ch = $self->reader->peek($length);
+    while ($ch =~ /^[0-9A-Za-z-_]$/) {
+        $length += 1;
+        $ch = $self->reader->peek($length);
+    }
+    if (not $length) {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . " expected alphabetic or numeric character, but found $ch ", $self->get_mark());
+    }
+    my $value = $self->reader->prefix($length);
+    $self->reader->forward($length);
+    $ch = $self->reader->peek();
+    if ($ch !~ /^[\0 \r\n\x85\u2028\u2029]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . " expected alphabetic or numeric character, but found $ch ", $self->get_mark());
+    }
+    return $value;
+}
+
+sub scan_yaml_directive_value {
+    my $self = shift;
+    my $start_mark = shift;
+    while ($self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    my $major = $self->scan_yaml_directive_number($start_mark);
+    if ($self->reader->peek() ne '.') {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . " expected a digit or '.' but found ", $self->reader->peek(), $self->reader->get_mark());
+    }
+    $self->reader->forward();
+    my $minor = $self->scan_yaml_directive_number($start_mark);
+    if ($self->reader->peek() !~ /^[\0 \r\n\x85\u2028\u2029]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . " expected alphabetic or numeric character, but found ", $self->reader->peek(),
+            $self->get_mark());
+    }
+    return "$major.$minor"; # XXX this is a tuple in python but...
+}
+
+sub scan_yaml_directive_number {
+    my $self = shift;
+    my $start_mark = shift;
+    my $ch = $self->reader->peek();
+    if ($ch !~ /^[0-9]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . " expected a digit but found $ch", $self->reader->get_mark());
+    }
+    my $length = 0;
+    while ($self->reader->peek($length) =~ /^[0-9]$/) {
+        $length += 1;
+    }
+    my $value = int($self->reader->prefix($length));
+    $self->reader->forward($length);
+    return $value;
+}
+
+sub scan_tag_directive_value {
+    my $self = shift;
+    die "scan_tag_directive_value";
+}
+
+sub scan_tag_directive_handle {
+    my $self = shift;
+    die "scan_tag_directive_handle";
+}
+
+sub scan_tag_directive_prefix {
+    my $self = shift;
+    die "scan_tag_directive_prefix";
+}
+
+sub scan_directive_ignored_line {
+    my $self = shift;
+    my $start_mark = shift;
+    while ($self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    if ($self->reader->peek() eq '#') {
+        while ($self->reader->peek !~ /^[\0\r\n]$/) {
+            $self->reader->forward();
+        }
+    }
+    my $ch = $self->reader->peek();
+    if ($ch !~ /^[\0\r\n\x85\u2028\u2029]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning a directive $start_mark "
+            . "expected a comment or a line break, but found $ch", $self->reader->get_mark());
+    }
+    return $self->scan_line_break();
+}
+
+sub scan_anchor {
+    my $self = shift;
+    my $token_class = shift;
+    my $start_mark = $self->reader->get_mark();
+    my $indicator = $self->reader->peek();
+    my $name;
+    if ($indicator eq '*') {
+        $name = 'alias';
+    } else {
+        $name = 'anchor';
+    }
+    $self->reader->forward();
+    my $length = 0;
+    my $ch = $self->reader->peek($length);
+    while ($ch =~ /^[0-9A-Za-z-_]$/) {
+        $length += 1;
+        $ch = $self->reader->peek($length);
+    }
+    if (not $length) {
+        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
+            . "alphabetic or numeric character, but found " . $self->get_mark());
+    }
+    my $value = $self->reader->prefix($length);
+    $self->reader->forward($length);
+    $ch = $self->reader->peek();
+    if ($ch !~ /^[\0 \t\r\n\x85\u2028\u2029?:,\]}%@]$/) {
+        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
+            . "alphabetic or numeric character, but found " . $self->get_mark());
+    }
+    my $end_mark = $self->reader->get_mark();
+    return $token_class->new(value => $value, start_mark => $start_mark, end_mark => $end_mark);
+}
+
+sub scan_tag {
+    my $self = shift;
+    die "scan_tag";
+}
+
+sub scan_block_scalar {
+    my $self = shift;
+    my $style = shift;
+    # See the specification for details.
+
+    my $folded;
+    if ($style eq '>') {
+        $folded = True;
+    }
+    else {
+        $folded = False;
+    }
+
+    my $chunks = [];
+    my $start_mark = $self->reader->get_mark();
+
+    # Scan the header.
+    $self->reader->forward();
+    my ($chomping, $increment) = $self->scan_block_scalar_indicators($start_mark);
+    $self->scan_block_scalar_ignored_line($start_mark);
+
+    # Determine the indentation level and go to the first non-empty line.
+    my $min_indent = $self->indent + 1;
+    if ($min_indent < 1) {
+        $min_indent = 1;
+    }
+    my ($breaks, $max_indent, $end_mark, $indent);
+    if (not defined $increment) {
+        ($breaks, $max_indent, $end_mark) = $self->scan_block_scalar_indentation();
+        $indent = $min_indent > $max_indent ? $min_indent : $max_indent;
+    }
+    else {
+        $indent = $min_indent + $increment - 1;
+        ($breaks, $end_mark) = $self->scan_block_scalar_breaks($indent);
+    }
+    my $line_break = '';
+
+    # Scan the inner part of the block scalar.
+    while ($self->reader->column == $indent and $self->reader->peek() ne "\0") {
+        push @$chunks, @$breaks;
+        my $leading_non_space = ($self->reader->peek() !~ /^[\ \t]$/);
+        my $length = 0;
+        while ($self->reader->peek($length) !~ /^[\0\r\n\x85\x{2028}\x{2029}]$/) {
+            $length += 1;
+        }
+        push @$chunks, $self->reader->prefix($length);
+        $self->reader->forward($length);
+        $line_break = $self->scan_line_break();
+        ($breaks, $end_mark) = $self->scan_block_scalar_breaks($indent);
+        if ($self->reader->column == $indent and $self->reader->peek() ne "\0") {
+
+            # Unfortunately, folding rules are ambiguous.
+            #
+            # This is the folding according to the specification:
+            
+            if ($folded and
+                $line_break eq "\n" and
+                $leading_non_space and
+                $self->reader->peek() !~ /^[\ \t]$/
+            ) {
+                if (not @$breaks) {
+                    push @$chunks, ' ';
+                }
+            }
+            else {
+                push @$chunks, $line_break;
+            }
+            
+            # This is Clark Evans's interpretation (also in the spec
+            # examples):
+            #
+            #if folded and line_break == u'\n':
+            #    if not breaks:
+            #        if self.peek() not in ' \t':
+            #            chunks.append(u' ')
+            #        else:
+            #            chunks.append(line_break)
+            #else:
+            #    chunks.append(line_break)
+        }
+        else {
+            last;
+        }
+    }
+
+    # Chomp the tail.
+    if (not defined $chomping or $chomping == True) {
+        push @$chunks, $line_break;
+    }
+    if (defined $chomping and $chomping == True) {
+        push @$chunks, @$breaks;
+    }
+
+    # We are done.
+    return YAML::Perl::Token::Scalar->new(
+        value => join('', @$chunks),
+        plain => False,
+        start_mark => $start_mark,
+        end_mark => $end_mark,
+        style => $style,
+    );
+}
+
+sub scan_block_scalar_indicators {
+    my $self = shift;
+    my $start_mark = shift;
+
+    # See the specification for details.
+    my $chomping = undef;
+    my $increment = undef;
+    my $ch = $self->reader->peek();
+    if ($ch =~ /^[\+\-]$/) {
+        if ($ch eq '+') {
+            $chomping = True;
+        }
+        else {
+            $chomping = False;
+        }
+        $self->reader->forward();
+        $ch = $self->reader->peek();
+        if ($ch =~ /^[0-9]$/) {
+            $increment = $ch;
+            if ($increment == 0) {
+                throw YAML::Perl::Error::Scanner(
+                    "while scanning a block scalar",
+                    $start_mark,
+                    "expected indentation indicator in the range 1-9, but found 0",
+                    $self->reader->get_mark()
+                );
+            }
+            $self->reader->forward();
+        }
+    }
+    elsif ($ch =~ /^[0-9]$/) {
+        $increment = $ch;
+        if ($increment == 0) {
+            raise ScannerError(
+                "while scanning a block scalar",
+                $start_mark,
+                "expected indentation indicator in the range 1-9, but found 0",
+                $self->reader->get_mark(),
+            );
+        }
+        $self->reader->forward();
+        $ch = $self->reader->peek();
+        if ($ch =~ /^[\+\-]$/) {
+            if ($ch eq '+') {
+                $chomping = True;
+            }
+            else {
+                $chomping = False;
+            }
+            $self->reader->forward();
+        }
+    }
+    $ch = $self->reader->peek();
+    if ($ch !~ /^[\0\ \r\n\x85\x{2028}\x{2029}]$/) {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a block scalar",
+            $start_mark,
+            "expected chomping or indentation indicators, but found %r",
+            $ch, #.encode('utf-8'),
+            $self->reader->get_mark(),
+        );
+    }
+    return ($chomping, $increment);
+}
+
+sub scan_block_scalar_ignored_line {
+    my $self= shift;
+    my $start_mark = shift;
+    # See the specification for details.
+    while ($self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    if ($self->reader->peek() eq '#') {
+        while ($self->reader->peek() !~ /^[\0\r\n\x85\x{2028}\x{2029}]$/) {
+            $self->reader->forward();
+        }
+    }
+    my $ch = $self->reader->peek();
+    if ($ch !~ /^[\0\r\n\x85\x{2028}\x{2029}]$/) {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a block scalar",
+            $start_mark,
+            "expected a comment or a line break, but found %r",
+            $ch, #.encode('utf-8'),
+            $self->get_mark(),
+        );
+    }
+    $self->scan_line_break();
+}
+
+sub scan_block_scalar_indentation {
+    my $self = shift;
+    die "scan_block_scalar_indentation";
+}
+
+sub scan_block_scalar_breaks {
+    my $self = shift;
+    my $indent = shift;
+    # See the specification for details.
+    my $chunks = [];
+    my $end_mark = $self->reader->get_mark();
+    while ($self->reader->column < $indent and $self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    while ($self->reader->peek() =~ /^[\r\n\x85\x{2028}\x{2029}]$/) {
+        push @$chunks, $self->scan_line_break();
+        $end_mark = $self->reader->get_mark();
+        while ($self->reader->column < $indent and $self->reader->peek() eq ' ') {
+            $self->reader->forward();
+        }
+    }
+    return ($chunks, $end_mark)
+
+}
+
+sub scan_flow_scalar {
+    my $self = shift;
+    my $style = shift;
+    # See the specification for details.
+    # Note that we loose indentation rules for quoted scalars. Quoted
+    # scalars don't need to adhere indentation because " and ' clearly
+    # mark the beginning and the end of them. Therefore we are less
+    # restrictive then the specification requires. We only need to check
+    # that document separators are not included in scalars.
+    my $double;
+    if ($style eq '"') {
+        $double = True;
+    }
+    else {
+        $double = False;
+    }
+    my $chunks = [];
+    my $start_mark = $self->reader->get_mark();
+    my $quote = $self->reader->peek();
+    $self->reader->forward();
+    push @$chunks, @{$self->scan_flow_scalar_non_spaces($double, $start_mark)};
+    while ($self->reader->peek() ne $quote) {
+        push @$chunks, @{$self->scan_flow_scalar_spaces($double, $start_mark)};
+        push @$chunks, @{$self->scan_flow_scalar_non_spaces($double, $start_mark)};
+    }
+    $self->reader->forward();
+    my $end_mark = $self->reader->get_mark();
+    return YAML::Perl::Token::Scalar->new(
+        value => join('', @$chunks),
+        plain => False,
+        start_mark => $start_mark,
+        end_mark => $end_mark,
+        style => $style,
+    );
+}
+
+use constant ESCAPE_REPLACEMENTS => {
+    '0' => "\0",
+    'a' => "\x07",
+    'b' => "\x08",
+    't' => "\x09",
+    '\t' => "\x09",
+    'n' => "\x0A",
+    'v' => "\x0B",
+    'f' => "\x0C",
+    'r' => "\x0D",
+    'e' => "\x1B",
+    ' ' => "\x20",
+    '\"' => "\"",
+    '\\' => "\\",
+    'N' => "\x85",
+    '_' => "\xA0",
+    'L' => "\u2028",
+    'P' => "\u2029",
+};
+
+use constant ESCAPE_CODES => {
+    'x' => 2,
+    '' => 4,
+    '' => 8,
+};
+
+sub scan_flow_scalar_non_spaces {
+    my $self = shift;
+    my $double = shift;
+    my $start_mark = shift;
+
+    # See the specification for details.
+    my $chunks = [];
+    while (True) {
+        my $length = 0;
+        while ($self->reader->peek($length) !~
+            /^[\'\"\\\0\ \t\r\n\x85\x{2028}\x{2029}]$/
+        ) {
+            $length += 1;
+        }
+        if ($length) {
+            push @$chunks, $self->reader->prefix($length);
+            $self->reader->forward($length);
+        }
+        my $ch = $self->reader->peek();
+        if (not $double and $ch eq '\'' and $self->reader->peek(1) eq '\'') {
+            push @$chunks, '\'';
+            $self->reader->forward(2);
+        }
+        elsif (($double and $ch eq '\'') or (not $double and $ch =~ /^[\"\\]$/)) {
+            push @$chunks, $ch;
+            $self->reader->forward();
+        }
+        elsif ($double and $ch eq '\\') {
+            $self->reader->forward();
+            $ch = $self->reader->peek();
+            if (exists ESCAPE_REPLACEMENTS->{$ch}) {
+                push @$chunks, ESCAPE_REPLACEMENTS->{$ch};
+                $self->reader->forward();
+            }
+            elsif (exists ESCAPE_CODES->{$ch}) {
+                $length = ESCAPE_CODES->{$ch};
+                $self->reader->forward();
+                for my $k (0 .. ($length - 1)) {
+                    if ($self->peek($k) !~ /^[0123456789ABCDEFabcdef]$/) {
+                        throw YAML::Perl::Error::Scanner(
+                            "while scanning a double-quoted scalar",
+                            $start_mark,
+                            "expected escape sequence of %d hexdecimal numbers, but found %r",
+                            ($length, $self->reader->peek($k)), #.encode('utf-8')),
+                            $self->get_mark(),
+                        );
+                    }
+                }
+                # XXX - Review this for multibyte and unicode
+                my $code = ord(pack "H*", $self->reader->prefix($length));
+                push @$chunks, chr($code);
+
+                $self->reader->forward($length);
+            }
+            elsif ($ch =~ /^[\r\n\x85\x{2028}\x{2029}]$/) {
+                $self->scan_line_break();
+                push @$chunks,
+                    @{$self->scan_flow_scalar_breaks($double, $start_mark)};
+            }
+            else {
+                throw YAML::Perl::Error::Scanner(
+                    "while scanning a double-quoted scalar",
+                    $start_mark,
+                    "found unknown escape character %r",
+                    $ch, #.encode('utf-8'),
+                    $self->get_mark()
+                );
+            }
+        }
+        else {
+            return $chunks
+        }
+    }
+}
+
+sub scan_flow_scalar_spaces {
+    my $self = shift;
+    my $double = shift;
+    my $start_mark = shift;
+
+    # See the specification for details.
+    my $chunks = [];
+    my $length = 0;
+    while ($self->reader->peek($length) =~ /^[\ \t]$/) {
+        $length += 1;
+    }
+    my $whitespaces = $self->reader->prefix($length);
+    $self->reader->forward($length);
+    my $ch = $self->reader->peek();
+    if ($ch eq "\0") {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a quoted scalar",
+            $start_mark,
+            "found unexpected end of stream",
+            $self->get_mark(),
+        );
+    }
+    elsif ($ch =~ /^[\r\n\x85\x{2028}\x{2029}]$/) {
+        my $line_break = $self->scan_line_break();
+        my $breaks = $self->scan_flow_scalar_breaks($double, $start_mark);
+        if ($line_break ne "\n") {
+            push @$chunks, $line_break;
+        }
+        elsif (not @$breaks) {
+            push @$chunks, ' ';
+        }
+        push @$chunks, @$breaks;
+    }
+    else {
+        push @$chunks, $whitespaces;
+    }
+    return $chunks;
+}
+
+sub scan_flow_scalar_breaks {
+    my $self = shift;
+    my $double = shift;
+    my $start_mark = shift;
+
+    # See the specification for details.
+    my $chunks = [];
+    while (True) {
+        # Instead of checking indentation, we check for document
+        # separators.
+        my $prefix = $self->reader->prefix(3);
+        if (
+            ($prefix eq '---' or $prefix eq '...') and
+            $self->reader->peek(3) =~ /^[\0\ \t\r\n\x85\x{2028}\x{2029}]$/
+        ) {
+            throw YAML::Perl::Error::Scanner(
+                "while scanning a quoted scalar",
+                $start_mark,
+                "found unexpected document separator",
+                $self.get_mark()
+            );
+        }
+        while ($self->reader->peek() =~ /^[\ \t]$/) {
+            $self->reader->forward();
+        }
+        if ($self->reader->peek() =~ /^[\r\n\x85\x{2028}\x{2029}]$/) {
+            push @$chunks, $self->scan_line_break();
+        }
+        else {
+            return $chunks;
+        }
+    }
+}
+
 sub scan_plain {
     my $self = shift;
 
@@ -750,41 +1397,6 @@ sub scan_plain {
     );
 }
 
-sub scan_anchor {
-    my $self = shift;
-    my $token_class = shift;
-    my $start_mark = $self->reader->get_mark();
-    my $indicator = $self->reader->peek();
-    my $name;
-    if ($indicator eq '*') {
-        $name = 'alias';
-    } else {
-        $name = 'anchor';
-    }
-    $self->reader->forward();
-    my $length = 0;
-    my $ch = $self->reader->peek($length);
-    while ($ch =~ /^[0-9A-Za-z-_]$/) {
-        $length += 1;
-        $ch = $self->reader->peek($length);
-    }
-    if (not $length) {
-        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
-            . "alphabetic or numeric character, but found " . $self->get_mark());
-    }
-    my $value = $self->reader->prefix($length);
-    $self->reader->forward($length);
-    $ch = $self->reader->peek();
-    if ($ch !~ /^[\0 \t\r\n\x85\u2028\u2029?:,\]}%@]$/) {
-        throw YAML::Perl::Error::Scanner("while scanning an $name $start_mark expected "
-            . "alphabetic or numeric character, but found " . $self->get_mark());
-    }
-    my $end_mark = $self->reader->get_mark();
-    return $token_class->new(value => $value, start_mark => $start_mark, end_mark => $end_mark);
-}
-
-
-
 #   ... ch in u'\r\n\x85\u2028\u2029':
 # XXX needs unicode linefeeds 
 my $linefeed = qr/^[\r\n\x85]$/;
@@ -838,6 +1450,21 @@ sub scan_plain_spaces {
         push @$chunks, $whitespaces;
     }
     return $chunks; 
+}
+
+sub scan_tag_handle {
+    my $self = shift;
+    die "scan_tag_handle";
+}
+
+sub scan_tag_uri {
+    my $self = shift;
+    die "scan_tag_uri";
+}
+
+sub scan_uri_escapes {
+    my $self = shift;
+    die "scan_uri_escapes";
 }
 
 sub scan_line_break {

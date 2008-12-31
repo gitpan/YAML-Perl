@@ -1,12 +1,11 @@
 use t::TestYAMLPerl; # tests => 2;
 
-use YAML::Perl::Emitter;
-use YAML::Perl::Events;
+use YAML::Perl::Representer;
 
 spec_file('t/data/parser_emitter');
-filters { events => [qw(lines chomp make_events emit_yaml)] };
+filters { perl => [qw'eval represent'] };
 
-run_is events => 'yaml';
+run_is perl => 'dump';
 
 sub make_events {
     map {
@@ -15,8 +14,8 @@ sub make_events {
    } @_;
 }
 
-sub emit_yaml {
-    YAML::Perl::Emitter->new()
+sub represent {
+    $_ = YAML::Perl::Representer->new()
         ->open()
-        ->emit(@_);
+        ->represent(@_);
 }
