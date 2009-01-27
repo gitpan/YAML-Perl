@@ -15,5 +15,6 @@ no_index:
     - t
 requires:
   Error: 0
+  Filter::Util::Call: 0
   perl: 5.005003
-version: 0.01_02
+version: 0.01_03
