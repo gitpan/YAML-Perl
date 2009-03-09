@@ -213,6 +213,45 @@ sub field {
     return $code if defined wantarray;
 }
 
+sub node_info {
+    my $stringify = $_[1] || 0;
+    my ($class, $type, $id) =
+        ref($_[0])
+        ? $stringify
+          ? _info("$_[0]")
+          : do {
+              require overload;
+              my @info = _info(overload::StrVal($_[0]));
+              if (ref($_[0]) eq 'Regexp') {
+                  @info[0, 1] = (undef, 'REGEXP');
+              }
+              @info;
+          }
+        : scalar_info($_[0]);
+    ($class, $type, $id) = scalar_info("$_[0]")
+        unless $id;
+    return wantarray ? ($class, $type, $id) : $id;
+}
+
+sub _info {
+    return (($_[0]) =~ qr{^(?:(.*)\=)?([^=]*)\(([^\(]*)\)$}o);
+};
+
+sub scalar_info {
+    my $id = 'undef';
+    my $type = '';
+    my $ext = '-S';
+    if (defined $_[0]) {
+        if (ref(\ $_[0]) eq 'GLOB') {
+            $type = 'GLOB';
+            $ext = '';
+        }
+        \$_[0] =~ /\((\w+)\)$/o or CORE::die();
+        $id = "$1$ext";
+    }
+    return ('', $type, $id);
+};
+
 sub _dump {
     no warnings 'once';
     require YAML::XS;
@@ -231,11 +270,15 @@ sub WWW {
 }
 
 sub assert {
+    require Carp;
     Carp::confess("assert failed") unless $_[0];
 }
 
 sub throw {
-    Carp::confess(join "\n", @_);
+    require Carp;
+    my $error = (join " ", map {my $val = "$_"; $val =~ s/\s*\z//; $val} @_) . "\n";
+    Carp::croak($error);
+    Carp::confess($error);
     Error::Simple->throw(@_);
 }
 
@@ -249,6 +292,7 @@ sub EXPORT_BASE {
         YAML::Perl::Base::assert
         YAML::Perl::Base::try
         YAML::Perl::Base::throw
+        YAML::Perl::Base::node_info
     );
 }
 
@@ -274,9 +318,8 @@ The YAML toolset is made up of a bunch of modules that are object
 oriented. All these modules inherit from YAML::Perl::Base, directly or
 eventually.
 
-In the spirit of Spiffyness (but without source filtering or
-dependencies) YAML::Perl::Base provides the C<field> accessor generator to all
-its subclasses. It also provides XXX for debugging with YAML::XS.
+YAML::Perl::Base provides the C<field> accessor generator to all its
+subclasses. It also provides XXX for debugging with YAML::XS.
 
 Additionally YAML::Perl::Base provides default C<new> and C<init> class
 methods for object construction.
@@ -287,7 +330,7 @@ Ingy döt Net <ingy@cpan.org>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2008. Ingy döt Net. All rights reserved.
+Copyright (c) 2008, 2009. Ingy döt Net. All rights reserved.
 
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.

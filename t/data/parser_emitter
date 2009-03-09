@@ -32,10 +32,10 @@ DocumentEnd
 StreamEnd
 +++ dump_dumper
 ---
-11: &id001
+11: &001
   53: 64
   75: 99
-42: *id001
+42: *001
 +++ nodes
 xxx
 +++ dump
@@ -188,3 +188,119 @@ StreamEnd
 +++ dump
 ---
 1: 2
+
+=== Block Literal
++++ events
+StreamStart
+DocumentStart
+Scalar value sub la {\n  ...\n}\n
+DocumentEnd
+StreamEnd
++++ yaml
+--- |
+  sub la {
+    ...
+  }
+
+
+=== Escapes
++++ events
+StreamStart
+DocumentStart
+Scalar value aaa<bbb\ccc
+DocumentEnd
+StreamEnd
++++ yaml
+--- "aaa\x3cbbb\\ccc"
+
+=== Folded
++++ events
+StreamStart
+DocumentStart
+Scalar value Foo Bar Baz\n
+DocumentEnd
+StreamEnd
++++ yaml
+--- >
+  Foo
+  Bar
+  Baz
+
+=== Indentless Sequence
++++ events
+StreamStart
+DocumentStart
+MappingStart
+Scalar value foo
+SequenceStart
+Scalar value 1
+Scalar value 2
+SequenceEnd
+MappingEnd
+DocumentEnd
+StreamEnd
++++ yaml
+foo:
+- 1
+- 2
+
+=== Hash in array
++++ perl
+[{}]
++++ dump
+---
+- {}
+
+=== YAML Tags
++++ yaml
+%TAG !! tag:yaml.org,2002:
+---
+!!str 42: !!float 42
++++ events
+StreamStart
+DocumentStart
+MappingStart
+Scalar value 42
+Scalar value 42
+MappingEnd
+DocumentEnd
+StreamEnd
+
+=== Literal Scalar
++++ events
+StreamStart
+DocumentStart
+Scalar value Four score and seven years ago\nour fathers brought forth\non this continent\n
+DocumentEnd
+StreamEnd
++++ dump
+--- |
+  Four score and seven years ago
+  our fathers brought forth
+  on this continent
+
+=== A blessed hash, array and scalar
++++ ONLYX
++++ perl
+[
+    bless({}, 'Foo'),
+    bless([], 'Bar'),
+    bless((\ do { my $x = "silly string"}), 'Baz'),
+]
++++ dump
+---
+- !!perl/hash:Foo {}
+- !!perl/array:Bar []
+- !!perl/scalar:Baz 'silly string'
++++ yaml
+---
+- !!perl/hash:Foo {}
+- !!perl/array:Bar []
+- !!perl/scalar:Baz silly string
+
+=== Mapping in a flow sequence
++++ yaml
+--- [ foo: bar, baz: 42]
++++ perl
+[ {foo => 'bar'}, {baz => 42} ]
+

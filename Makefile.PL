@@ -4,10 +4,12 @@ name 'YAML-Perl';
 
 all_from 'lib/YAML/Perl.pm';
 
-requires 'Error';
+requires 'Error'                => 0;
 
 use_test_base;
 
 clean_files 'pyyaml/lib/yaml/*.pyc';
+
+auto_install;
 
 WriteAll;

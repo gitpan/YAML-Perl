@@ -1,4 +1,11 @@
 ---
+version: 0.02
+date:    Sun Mar  8 17:21:05 PDT 2009
+changes:
+- Parser port is done
+- Most basic functionality is working.
+- Updated doc a little bit to detail current status.
+---
 version: 0.01_03
 date:    Mon Jan 26 16:14:16 PST 2009
 changes:

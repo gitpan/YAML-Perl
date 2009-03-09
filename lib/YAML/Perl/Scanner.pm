@@ -603,7 +603,9 @@ sub fetch_anchor {
 
 sub fetch_tag {
     my $self = shift;
-    die "fetch_tag";
+    $self->save_possible_simple_key();
+    $self->allow_simple_key(False);
+    push @{$self->tokens}, $self->scan_tag();
 }
 
 sub fetch_literal {
@@ -613,7 +615,7 @@ sub fetch_literal {
 
 sub fetch_folded {
     my $self = shift;
-    die "fetch_folded";
+    $self->fetch_block_scalar('>');
 }
 
 sub fetch_block_scalar {
@@ -849,17 +851,48 @@ sub scan_yaml_directive_number {
 
 sub scan_tag_directive_value {
     my $self = shift;
-    die "scan_tag_directive_value";
+    my $start_mark = shift;
+    while ($self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    my $handle = $self->scan_tag_directive_handle($start_mark);
+    while ($self->reader->peek() eq ' ') {
+        $self->reader->forward();
+    }
+    my $prefix = $self->scan_tag_directive_prefix($start_mark);
+    return [$handle, $prefix];
 }
 
 sub scan_tag_directive_handle {
     my $self = shift;
-    die "scan_tag_directive_handle";
+    my $start_mark = shift;
+    my $value = $self->scan_tag_handle('directive', $start_mark);
+    my $ch = $self->reader->peek();
+    if ($ch ne ' ') {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a directive",
+            $start_mark,
+            "expected ' ', but found %r", $ch->encode('utf-8'),
+            $self->get_mark()
+        );
+    }
+    return $value;
 }
 
 sub scan_tag_directive_prefix {
     my $self = shift;
-    die "scan_tag_directive_prefix";
+    my $start_mark = shift;
+    my $value = $self->scan_tag_uri('directive', $start_mark);
+    my $ch = $self->reader->peek();
+    if ($ch !~ /^[\0\ \r\n\x85\x{2028}\x{2029}]$/) {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a directive",
+            $start_mark,
+            "expected ' ', but found %r", $ch->encode('utf-8'),
+            $self->get_mark()
+        );
+    }
+    return $value;
 }
 
 sub scan_directive_ignored_line {
@@ -916,7 +949,67 @@ sub scan_anchor {
 
 sub scan_tag {
     my $self = shift;
-    die "scan_tag";
+    my $start_mark = $self->reader->get_mark();
+    my $ch = $self->reader->peek(1);
+    my ($suffix, $handle);
+    if ($ch eq '<') {
+        my $handle = undef;
+        $self->forward(2);
+        $suffix = $self->scan_tag_uri('tag', $start_mark);
+        if ($self->reader->peek() ne '>') {
+            throw YAML::Perl::Error::Scanner(
+                "while parsing a tag",
+                $start_mark,
+                "expected '>', but found %r",
+                $self->peek()->encode('utf-8'),
+                $self->reader->get_mark(),
+            );
+        }
+        $self->forward();
+    }
+    elsif ($ch =~ /^[\0 \t\r\n\x85\x{2028}\x{2029}]$/) {
+        $handle = undef;
+        $suffix = '!';
+        $self->reader->forward();
+    }
+    else {
+        my $length = 1;
+        my $use_handle = False;
+        while ($ch !~ /^[\0 \r\n\x85\x{2028}\x{2029}]$/) {
+            if ($ch eq '!') {
+                $use_handle = True;
+                last;
+            }
+            $length += 1;
+            $ch = $self->reader->peek($length);
+        }
+        $handle = '!';
+        if ($use_handle) {
+            $handle = $self->scan_tag_handle('tag', $start_mark);
+        }
+        else {
+            $handle = '!';
+            $self->reader->forward();
+        }
+        $suffix = $self->scan_tag_uri('tag', $start_mark);
+    }
+    $ch = $self->reader->peek();
+    if ($ch !~ /^[\0 \r\n\x85\x{2028}\x{2029}]$/) {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a tag",
+            $start_mark,
+            "expected ' ', but found %r",
+            $ch->encode('utf-8'),
+            $self->reader->get_mark()
+        );
+    }
+    my $value = [$handle, $suffix];
+    my $end_mark = $self->reader->get_mark();
+    return YAML::Perl::Token::Tag->new(
+        value => $value,
+        start_mark => $start_mark,
+        end_mark => $end_mark,
+    );
 }
 
 sub scan_block_scalar {
@@ -1114,7 +1207,22 @@ sub scan_block_scalar_ignored_line {
 
 sub scan_block_scalar_indentation {
     my $self = shift;
-    die "scan_block_scalar_indentation";
+    my $chunks = [];
+    my $max_indent = 0;
+    my $end_mark = $self->reader->get_mark();
+    while ($self->reader->peek() =~ /^[\ \r\n\x85\x{2028}\x{2029}]$/) {
+        if ($self->reader->peek() ne ' ') {
+            push @$chunks, $self->scan_line_break();
+            $end_mark = $self->reader->get_mark();
+        }
+        else {
+            $self->reader->forward();
+            if ($self->reader->column > $max_indent) {
+                $max_indent = $self->reader->column;
+            }
+        }
+    }
+    return $chunks, $max_indent, $end_mark;
 }
 
 sub scan_block_scalar_breaks {
@@ -1195,8 +1303,8 @@ use constant ESCAPE_REPLACEMENTS => {
 
 use constant ESCAPE_CODES => {
     'x' => 2,
-    '' => 4,
-    '' => 8,
+    'u' => 4,
+    'U' => 8,
 };
 
 sub scan_flow_scalar_non_spaces {
@@ -1237,7 +1345,7 @@ sub scan_flow_scalar_non_spaces {
                 $length = ESCAPE_CODES->{$ch};
                 $self->reader->forward();
                 for my $k (0 .. ($length - 1)) {
-                    if ($self->peek($k) !~ /^[0123456789ABCDEFabcdef]$/) {
+                    if ($self->reader->peek($k) !~ /^[0123456789ABCDEFabcdef]$/) {
                         throw YAML::Perl::Error::Scanner(
                             "while scanning a double-quoted scalar",
                             $start_mark,
@@ -1264,7 +1372,7 @@ sub scan_flow_scalar_non_spaces {
                     $start_mark,
                     "found unknown escape character %r",
                     $ch, #.encode('utf-8'),
-                    $self->get_mark()
+                    $self->reader->get_mark()
                 );
             }
         }
@@ -1470,12 +1578,78 @@ sub scan_plain_spaces {
 
 sub scan_tag_handle {
     my $self = shift;
-    die "scan_tag_handle";
+    my $name = shift;
+    my $start_mark = shift;
+    my $ch = $self->reader->peek();
+    if ($ch ne '!') {
+        throw YAML::Perl::Error::Scanner(
+            "while scanning a %s",
+            $name,
+            $start_mark,
+            "expected '!', but found %r",
+            $ch->encode('utf-8'),
+            $self->get_mark(),
+        );
+    }
+    my $length = 1;
+    $ch = $self->reader->peek($length);
+    if ($ch ne ' ') {
+        while ($ch =~ /^[0-9A-Za-z\-\_]$/) {
+            $length += 1;
+            $ch = $self->reader->peek($length);
+        }
+        if ($ch ne '!') {
+            $self->reader->forward($length);
+            throw YAML::Perl::Error::Scanner(
+                "while scanning a %s",
+                $name,
+                $start_mark,
+                "expected '!', but found %r",
+                $ch->encode('utf-8'),
+                self->reader->get_mark(),
+            );
+        }
+        $length += 1;
+    }
+    my $value = $self->reader->prefix($length);
+    $self->reader->forward($length);
+    return $value;
 }
 
 sub scan_tag_uri {
     my $self = shift;
-    die "scan_tag_uri";
+    my $name = shift;
+    my $start_mark = shift;
+    my $chunks = [];
+    my $length = 0;
+    my $ch = $self->reader->peek($length);
+    while ($ch =~ /^[0-9A-Za-z\-\;\/\?\:\@\&\=\+\$\,\_\.\!\~\*\'\(\)\[\]\%]$/) {
+        if ($ch eq '%') {
+            push @$chunks, $self->reader->prefix($length);
+            $self->reader->forward($length);
+            $length = 0;
+            push @$chunks, $self->scan_uri_escapes($name, $start_mark);
+        }
+        else {
+            $length += 1;
+        }
+        $ch = $self->reader->peek($length);
+    }
+    if ($length) {
+        push @$chunks, $self->reader->prefix($length);
+        $self->reader->forward($length);
+        $length = 0;
+    }
+    if (not @$chunks) {
+        throw YAML::Perl::Error::Scanner("while parsing a %s",
+            $name,
+            $start_mark,
+            "expected URI, but found %r",
+            $ch->encode('utf-8'),
+            $self->get_mark(),
+        );
+    }
+    return join '', @$chunks;
 }
 
 sub scan_uri_escapes {

@@ -1,4 +1,8 @@
-use t::TestYAMLPerl tests => 2;
+use t::TestYAMLPerl;
+
+skip_all_unless_require('YAML::XS');
+
+plan tests => 2;
 
 use YAML::Perl::Composer;
 use YAML::Perl::Events;
@@ -11,19 +15,13 @@ filters {
 
 run {
     my $block = shift;
+    return unless $block->{yaml};
     my (@nodes) = @{$block->{yaml}};
     return unless $block->{nodes};
     my (@want) = @{$block->{nodes}}; 
     like ref($nodes[0]), qr/^YAML::Perl::Node::/,
         'compose() produces a YAML node';
 };
-
-sub make_events {
-    map {
-       my ($event, @args) = split;
-       "YAML::Perl::Event::$event"->new(@args);
-   } @_;
-}
 
 sub event_string {
     map {
@@ -40,4 +38,8 @@ sub compose_yaml {
     my $c = YAML::Perl::Composer->new();
     $c->open($_);
     $c->compose();
+}
+
+sub yaml_load {
+    YAML::XS::Load(@_);
 }

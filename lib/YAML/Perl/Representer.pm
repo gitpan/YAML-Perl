@@ -1,6 +1,7 @@
 package YAML::Perl::Representer;
 use strict;
 use warnings;
+use overload();
 
 use YAML::Perl::Error;
 use YAML::Perl::Nodes;
@@ -86,14 +87,27 @@ sub represent_data {
 #     #if alias_key is not None:
 #     #    self.represented_objects[alias_key] = node
 
-    if (not ref($data)) {
-        $node = $self->represent_scalar(undef, $data);
+    if (not ref($data) or overload::Method($data, '""')) {
+        return $self->represent_scalar(undef, $data);
     }
-    elsif (ref($data) eq 'ARRAY') {
-        $node = $self->represent_sequence(undef, $data);
+    my ($class, $type, $id) = node_info($data);
+    if ($type eq 'ARRAY') {
+        my $tag = $class
+        ? "tag:yaml.org,2002:perl/array:$class"
+        : undef;
+        $node = $self->represent_sequence($tag, $data);
     }
-    elsif (ref($data) eq 'HASH') {
-        $node = $self->represent_mapping(undef, $data);
+    elsif ($type eq 'HASH') {
+        my $tag = $class
+        ? "tag:yaml.org,2002:perl/hash:$class"
+        : undef;
+        $node = $self->represent_mapping($tag, $data);
+    }
+    elsif ($type eq 'SCALAR') {
+        my $tag = $class
+        ? "tag:yaml.org,2002:perl/scalar:$class"
+        : undef;
+        $node = $self->represent_scalar($tag, $data);
     }
     else {
         die "can't represent '$data' yet...";
@@ -106,6 +120,10 @@ sub represent_scalar {
     my $tag = shift;
     my $value = shift;
     my $style = @_ ? shift : undef;
+    if ($tag) {
+        #tag:yaml.org,2002:perl/hash:Baz
+        $value = $$value;
+    }
     if (not defined $style) {
         $style = $self->default_style;
     }

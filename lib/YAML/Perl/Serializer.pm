@@ -18,10 +18,10 @@ field 'emitter', -init => '$self->create("emitter")';
 field 'resolver_class', 'YAML::Perl::Resolver';
 field 'resolver', -init => '$self->create("resolver")';
 
-use constant ANCHOR_TEMPLATE => 'id%03d';
+use constant ANCHOR_TEMPLATE => '%03d';
 
 field 'use_encoding';
-field 'use_explicit_start';
+field 'use_explicit_start' => 1;
 field 'use_explicit_end';
 field 'use_version';
 field 'use_tags';
@@ -197,4 +197,5 @@ sub serialize_node {
         $self->resolver->ascend_resolver();
     }
 }
+
 1;

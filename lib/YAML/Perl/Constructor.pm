@@ -60,7 +60,8 @@ sub get_data {
 }
 
 sub get_single_data {
-    die "get_single_data";
+    # We won't port this. We allow scalar construction of a single node in a
+    # multi document stream.
 }
 
 sub construct_document {
@@ -91,8 +92,8 @@ sub construct_object {
         $old_deep = $self->deep_construct();
         $self->deep_construct(True);
     }
-    if ($self->constructed_objects->{node}) {
-        return $self->constructed_objects->{node};
+    if ($self->constructed_objects->{$node}) {
+        return $self->constructed_objects->{$node};
     }
     if ($self->recursive_objects->{$node}) {
         throw YAML::Perl::Error::Constructor(
@@ -170,7 +171,13 @@ sub construct_scalar {
             $node->start_mark,
         );
     }
-    return $node->value;
+    my $scalar = $node->value;
+    if (my $tag = $node->tag) {
+        if ($tag =~ s/^tag:yaml.org,2002:perl\/scalar://) {
+            return bless \ $scalar, $tag;
+        }
+    }
+    return $scalar;
 }
 
 sub construct_sequence {
@@ -186,9 +193,15 @@ sub construct_sequence {
             $node->start_mark,
         );
     }
-    return [
+    my $sequence = [
         map $self->construct_object($_, $deep), @{$node->value}
     ];
+    if (my $tag = $node->tag) {
+        if ($tag =~ s/^tag:yaml.org,2002:perl\/array://) {
+            bless $sequence, $tag;
+        }
+    }
+    return $sequence;
 }
 
 sub construct_mapping {
@@ -216,6 +229,11 @@ sub construct_mapping {
 #                     "found unacceptable key (%s)" % exc, key_node.start_mark)
         my $value = $self->construct_object($value_node, $deep);
         $mapping->{$key} = $value;
+    }
+    if (my $tag = $node->tag) {
+        if ($tag =~ s/^tag:yaml.org,2002:perl\/hash://) {
+            bless $mapping, $tag;
+        }
     }
     return $mapping;
 }
